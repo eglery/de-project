@@ -1,0 +1,5 @@
+logs/*
+data/*
+!data/chunks
+data/chunks/*
+test.py
