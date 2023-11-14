@@ -1,5 +1,6 @@
 logs/*
-data/*
-!data/chunks
+data/insert_arxiv_tables.sql
+data/arxiv-metadata-oai-snapshot.json
 data/chunks/*
+!data/chunks/readme.Md
 test.py
