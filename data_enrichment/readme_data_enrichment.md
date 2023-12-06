@@ -1,3 +1,9 @@
+- scolarly_search.py - currently just for testing
+
+- query_crossref.py
+
+ABOUT CROSSREF:
+
 The output is a JSON response from the Crossref REST API for the DOI 10.1103/PhysRevLett.115.147001. It contains a wealth of information about the specified academic publication. Here's a breakdown of some key elements in the output:
 
 Basic Information:
