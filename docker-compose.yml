@@ -1,8 +1,20 @@
 version: '3.8'
+
 services:
+  import_neo4j:
+    image: neo4j:latest
+    container_name: import_neo4j
+    environment:
+      - NEO4J_AUTH=none
+    volumes:
+      - ./neo4j/data:/data
+      - ./neo4j/import:/import
+      - ./neo4j/logs:/logs
+    command: ["bash", "-c", "while [ ! -f /import/finished_import.flag ]; do sleep 1; done && echo 'File found, starting first Neo4j instance.' && neo4j-admin database import full --overwrite-destination=true --multiline-fields=true --skip-duplicate-nodes=true --nodes=Papers=/import/papers_header.csv,/import/papers.csv,/import/papers1.csv --nodes=Authors=/import/authors_header.csv,/import/authors.csv,/import/authors1.csv --relationships=WROTE=/import/relations_header.csv,/import/relations.csv,/import/relations1.csv"]
+
   neo4j:
     image: neo4j:latest
-    container_name: my_neo4j
+    container_name: neo4j
     ports:
       - '7474:7474'
       - '7687:7687'
@@ -12,4 +24,6 @@ services:
       - ./neo4j/data:/data
       - ./neo4j/import:/import
       - ./neo4j/logs:/logs
-    command: neo4j-admin database import full --overwrite-destination=true --multiline-fields=true --skip-duplicate-nodes=true --nodes=Papers=/import/papers_header.csv,/import/papers.csv,/import/papers1.csv --nodes=Authors=/import/authors_header.csv,/import/authors.csv,/import/authors1.csv --relationships=WROTE=/import/relations_header.csv,/import/relations.csv,/import/relations1.csv
+    depends_on:
+      import_neo4j:
+        condition: service_completed_successfully
