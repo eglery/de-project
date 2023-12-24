@@ -9,8 +9,6 @@ from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.operators.python_operator import ShortCircuitOperator
 from airflow.hooks.postgres_hook import PostgresHook
 from airflow.operators.bash_operator import BashOperator
-import csv
-import re
 
 DEFAULT_ARGS = {
     'owner': 'DataEEngineering',
@@ -235,10 +233,15 @@ execute_chunks_operator = PythonOperator(
 )
 
 def prepare_neo4j_files():
+    import csv
+    import re
+
     files = os.listdir(CHUNKS_PATH)
     files = list(filter(lambda file: file != 'readme.Md' and file.split('.')[1] == 'json', files))
 
     i = 0
+    authors = {}
+    author_id = 0
 
     for file in files:
         chunk_file = f'{CHUNKS_PATH}/{file}'
@@ -256,37 +259,55 @@ def prepare_neo4j_files():
                 for author in row['authors']:
                     exploded = row.copy()
                     exploded['authors'] = author.replace('"','').replace("'",'').replace('\\','').replace('\n','')
+                    if exploded['authors'] not in authors:
+                        authors[exploded['authors']] = author_id
+                        author_id += 1
                     rows.append(exploded)
-        authors = [{'personId:ID': row['authors'].split(' ')[-1].lower(), 'name': row['authors'], ':LABEL': 'Author'} for row in rows]
-        relations = [{':START_ID': row['authors'].split(' ')[-1].lower(), ':END_ID': row['id'], ':TYPE': 'WROTE'} for row in rows]
+        relations = [{':START_ID': authors[row['authors']], ':END_ID': row['id'], ':TYPE': 'WROTE'} for row in rows]
 
-        with open(f'authors_{i}.csv', 'w') as csvfile:
-            writer = csv.DictWriter(csvfile, list(authors[0].keys()))
-            writer.writerows(authors)
-        with open(f'papers_{i}.csv', 'w') as csvfile:
+        with open(f'/tmp/import/papers_{i}.csv', 'w') as csvfile:
             writer = csv.DictWriter(csvfile, list(papers[0].keys()))
             writer.writerows(papers)
-        with open(f'relations_{i}.csv', 'w') as csvfile:
+        with open(f'/tmp/import/relations_{i}.csv', 'w') as csvfile:
             writer = csv.DictWriter(csvfile, list(relations[0].keys()))
             writer.writerows(relations)
         
         if i == 0:
-            with open('authors_header.csv', 'w') as csvfile:
-                writer = csv.DictWriter(csvfile, list(authors[0].keys()))
+            with open('/tmp/import/authors_header.csv', 'w') as csvfile:
+                writer = csv.DictWriter(csvfile, ['personId:ID', 'name', ':LABEL'])
                 writer.writeheader()
-            with open('papers_header.csv', 'w') as csvfile:
+            with open('/tmp/import/papers_header.csv', 'w') as csvfile:
                 writer = csv.DictWriter(csvfile, list(papers[0].keys()))
                 writer.writeheader()
-            with open('relations_header.csv', 'w') as csvfile:
+            with open('/tmp/import/relations_header.csv', 'w') as csvfile:
                 writer = csv.DictWriter(csvfile, list(relations[0].keys()))
                 writer.writeheader()
+
+        if i == len(files)-1:
+            batch_size = len(authors) // len(files)
+            prev_batch = 0
+            for j in range(len(files)):
+                with open(f'/tmp/import/authors_{j}.csv', 'w') as csvfile:
+                    writer = csv.DictWriter(csvfile, ['personId:ID', 'name', ':LABEL'])
+                    if j != len(files)-1:
+                        batch = [{'personId:ID': v, 'name': k, ':LABEL': 'Author'} for k, v in authors.items() if prev_batch <= v < prev_batch+batch_size]
+                    else:
+                        batch = [{'personId:ID': v, 'name': k, ':LABEL': 'Author'} for k, v in authors.items() if prev_batch <= v]
+                    prev_batch = prev_batch + batch_size
+                    writer.writerows(batch)
         
         i += 1
 
-generate_flag_task = BashOperator(
-    task_id='generate_flag_import',
-    bash_command='touch /tmp/import/finished_import.flag',
+execute_prepare_neo4j_operator = PythonOperator(
+    task_id='execute_prepare_neo4j_files',
+    python_callable=prepare_neo4j_files,
     dag=load_arxiv_data,
 )
 
-check_data_operator >> insert_tables_to_db_operator >> split_file_operator >> prepare_chunk_operator >> execute_chunks_operator >> generate_flag_task
+execute_neo4j_import_operator = BashOperator(
+    task_id='execute_neo4j_import',
+    bash_command='touch /tmp/import/started_import.flag && while [ -f /tmp/import/started_import.flag ]; do sleep 1; done && echo "started_import.flag has been deleted, finishing the process."',
+    dag=load_arxiv_data,
+)
+
+check_data_operator >> insert_tables_to_db_operator >> split_file_operator >> prepare_chunk_operator >> execute_chunks_operator >> generate_flag_task >> execute_prepare_neo4j_operator >> execute_neo4j_import_operator
