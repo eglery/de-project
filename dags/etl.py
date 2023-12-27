@@ -246,20 +246,20 @@ def prepare_neo4j_files():
     for file in files:
         chunk_file = f'{CHUNKS_PATH}/{file}'
             
-        rows = []
+        relations = []
         papers = []
         with open(chunk_file, 'r') as file:
             for row in file:
                 row = json.loads(row)
-                row = {col: row[col] for col in row if col}
+                row = {col: row[col] for col in row if col not in ['comments', 'abstract']}
                 row['title'] = row['title'].replace('"','').replace("'",'').replace('\\','').replace('\n','')
                 row['submitter'] = 'null' if row['submitter'] is None else row['submitter']
                 row['submitter'] = row['submitter'].replace('"','').replace("'",'').replace('\\','').replace('\n','')
                 row['journal-ref'] = 'null' if row['journal-ref'] is None else row['journal-ref']
                 row['doi'] = 'null' if row['doi'] is None else row['doi']
                 row['report-no'] = 'null' if row['report-no'] is None else row['report-no']
+                row['categories'] = 'null' if row['categories'] is None else row['categories']
                 row['license'] = 'null' if row['license'] is None else row['license']
-                row['abstract'] = 'null' if row['abstract'] is None else row['abstract']
                 row['update_date'] = 'null' if row['update_date'] is None else row['update_date']
                 papers.append({'paperId:ID': row['id'], 'title': row['title'], 'journal-ref': row['journal-ref'], 'doi': row['doi'], 'report-no': row['report-no'], 'categories': row['categories'], 'license': row['license'], 'update_date': row['update_date'], ':LABEL': 'Paper'})
                 row['authors'] = re.sub(r'\s*\([^()]*\)', '', re.sub(r'\s*\([^()]*\)', '', row['authors']))
@@ -268,13 +268,11 @@ def prepare_neo4j_files():
                     exploded = row.copy()
                     exploded['authors'] = author.replace('"','').replace("'",'').replace('\\','').replace('\n','')
                     if exploded['authors'] not in authors:
-                        if exploded['submitter'].split(' ')[-1] not in exploded['authors']:
-                            authors[exploded['authors']] = (author_id, 'Author')
-                        else:
-                            authors[exploded['authors']] = (author_id, 'Author|Submitter')
+                        authors[exploded['authors']] = author_id
+                        if exploded['submitter'].split(' ')[-1] in exploded['authors']:
+                            relations.append({':START_ID': authors[exploded['authors']], ':END_ID': exploded['id'], ':TYPE': 'SUBMITTED'})
+                        relations.append({':START_ID': authors[exploded['authors']], ':END_ID': exploded['id'], ':TYPE': 'WROTE'})
                         author_id += 1
-                    rows.append(exploded)
-        relations = [{':START_ID': authors[row['authors']], ':END_ID': row['id'], ':TYPE': 'WROTE'} for row in rows]
 
         with open(f'/tmp/import/papers_{i}.csv', 'w', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, list(papers[0].keys()))
@@ -301,9 +299,9 @@ def prepare_neo4j_files():
                 with open(f'/tmp/import/authors_{j}.csv', 'w') as csvfile:
                     writer = csv.DictWriter(csvfile, ['personId:ID', 'name', ':LABEL'])
                     if j != len(files)-1:
-                        batch = [{'personId:ID': v[0], 'name': k, ':LABEL': v[1]} for k, v in authors.items() if prev_batch <= v[0] < prev_batch+batch_size]
+                        batch = [{'personId:ID': v, 'name': k, ':LABEL': 'Author'} for k, v in authors.items() if prev_batch <= v < prev_batch+batch_size]
                     else:
-                        batch = [{'personId:ID': v[0], 'name': k, ':LABEL': v[1]} for k, v in authors.items() if prev_batch <= v[0]]
+                        batch = [{'personId:ID': v, 'name': k, ':LABEL': 'Author'} for k, v in authors.items() if prev_batch <= v]
                     prev_batch = prev_batch + batch_size
                     writer.writerows(batch)
         
