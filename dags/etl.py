@@ -246,7 +246,7 @@ def prepare_neo4j_files():
     for file in files:
         chunk_file = f'{CHUNKS_PATH}/{file}'
             
-        relations = []
+        rows = []
         papers = []
         with open(chunk_file, 'r') as file:
             for row in file:
@@ -269,10 +269,10 @@ def prepare_neo4j_files():
                     exploded['authors'] = author.replace('"','').replace("'",'').replace('\\','').replace('\n','')
                     if exploded['authors'] not in authors:
                         authors[exploded['authors']] = author_id
-                        if exploded['submitter'].split(' ')[-1] in exploded['authors']:
-                            relations.append({':START_ID': authors[exploded['authors']], ':END_ID': exploded['id'], ':TYPE': 'SUBMITTED'})
-                        relations.append({':START_ID': authors[exploded['authors']], ':END_ID': exploded['id'], ':TYPE': 'WROTE'})
                         author_id += 1
+                    rows.append(exploded)
+        relations = [{':START_ID': authors[row['authors']], ':END_ID': row['id'], ':TYPE': 'WROTE'} for row in rows]
+        relations = relations + [{':START_ID': authors[row['authors']], ':END_ID': row['id'], ':TYPE': 'SUBMITTED'} for row in rows if row['submitter'].split(' ')[-1] in row['authors']]
 
         with open(f'/tmp/import/papers_{i}.csv', 'w', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, list(papers[0].keys()))
