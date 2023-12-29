@@ -109,6 +109,7 @@ services:
       - '7687:7687'
     environment:
       - NEO4J_AUTH=none
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*
     volumes:
       - ./neo4j/data:/data
       - ./neo4j/import:/import

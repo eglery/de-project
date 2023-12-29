@@ -267,6 +267,8 @@ def prepare_neo4j_files():
                 for author in row['authors']:
                     exploded = row.copy()
                     exploded['authors'] = author.replace('"','').replace("'",'').replace('\\','').replace('\n','')
+                    if 'collaboration' in exploded['authors'].lower() or 'et al' in exploded['authors'].lower() or exploded['authors'] == 'Jr.':
+                        continue
                     if exploded['authors'] not in authors:
                         authors[exploded['authors']] = author_id
                         author_id += 1
