@@ -18,11 +18,7 @@ WHERE
     sub.is_referenced_by_count >= sub.rn
 GROUP BY ad.id, ad.author;
 
-
 REFRESH MATERIALIZED VIEW author_h_index;
-
-
---SELECT * FROM author_h_index LIMIT 10;
 
 CREATE MATERIALIZED VIEW journal_h_index AS
 SELECT
@@ -45,9 +41,6 @@ GROUP BY jd.id, jd.container_title;
 
 REFRESH MATERIALIZED VIEW journal_h_index;
 
---SELECT * FROM journal_h_index LIMIT 10;
-
-
 CREATE MATERIALIZED VIEW category_h_index AS
 SELECT
     cd.id AS category_id,
@@ -69,3 +62,41 @@ WHERE
 GROUP BY cd.id, cd.category;
 
 REFRESH MATERIALIZED VIEW category_h_index;
+
+WITH ranked_publishers AS (
+    SELECT
+        EXTRACT(YEAR FROM pod.published_date) AS publishing_year,
+        pd.publisher,
+        COUNT(af.id) AS articles_published,
+        RANK() OVER (
+            PARTITION BY EXTRACT(YEAR FROM pod.published_date)
+            ORDER BY COUNT(af.id) DESC
+        ) as rank
+    FROM
+        articles_fact af
+    INNER JOIN publishers_dim pd ON af.publisher_id = pd.id
+    INNER JOIN published_online_dim pod ON af.published_online_id = pod.id
+    GROUP BY
+        pd.publisher,
+        EXTRACT(YEAR FROM pod.published_date)
+),
+ranked_with_previous_next AS (
+    SELECT
+        publishing_year,
+        publisher,
+        articles_published,
+        rank,
+        LAG(rank) OVER (PARTITION BY publisher ORDER BY publishing_year) AS previous_year_rank,
+        LEAD(rank) OVER (PARTITION BY publisher ORDER BY publishing_year) AS next_year_rank
+    FROM
+        ranked_publishers
+)
+SELECT
+    publishing_year,
+    publisher,
+    articles_published,
+    rank,
+    previous_year_rank,
+    next_year_rank
+FROM
+    ranked_with_previous_next;
