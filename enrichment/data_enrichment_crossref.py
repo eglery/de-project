@@ -11,8 +11,8 @@ api_max_workers = 20
 select_columns = ['doi']
 drop_nan_columns = ['doi'] # for dropping all columns with missing DOI
 
-raw_file = '../data/chunks/chunk_10.json' #input
-enriched_file = '../data/enriched/en_chunk_10.parquet' #output
+raw_file = '../data/chunks/chunk_14.json' #input
+enriched_file = '../data/enriched/en_chunk_14.parquet' #output
 
 
 
