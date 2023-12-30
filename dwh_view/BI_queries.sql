@@ -63,6 +63,12 @@ GROUP BY cd.id, cd.category;
 
 REFRESH MATERIALIZED VIEW category_h_index;
 
+
+
+
+
+-- publisher_yearly_rank
+CREATE MATERIALIZED VIEW publisher_yearly_rank AS
 WITH ranked_publishers AS (
     SELECT
         EXTRACT(YEAR FROM pod.published_date) AS publishing_year,
@@ -100,3 +106,74 @@ SELECT
     next_year_rank
 FROM
     ranked_with_previous_next;
+
+
+SELECT
+    td.type,
+    AVG(af.is_referenced_by_count - af.references_count) AS avg_citation_difference
+FROM
+    articles_fact af
+INNER JOIN types_dim td ON af.type_id = td.id
+GROUP BY
+    td.type
+ORDER BY
+    avg_citation_difference DESC;
+
+   
+DROP MATERIALIZED VIEW IF EXISTS author_diversity_rank;
+CREATE MATERIALIZED VIEW IF NOT EXISTS author_diversity_rank AS
+WITH author_category_rank AS (
+    SELECT
+        ad.author,
+        COUNT(DISTINCT acb.category_id) AS category_count,
+        RANK() OVER (ORDER BY COUNT(DISTINCT acb.category_id) DESC) AS category_rank
+    FROM
+        authors_dim ad
+    JOIN article_authors_bridge aab ON ad.id = aab.author_id
+    JOIN article_category_bridge acb ON aab.article_id = acb.article_id
+    GROUP BY ad.author
+),
+author_publisher_rank AS (
+    SELECT
+        ad.author,
+        COUNT(DISTINCT af.publisher_id) AS publisher_count,
+        RANK() OVER (ORDER BY COUNT(DISTINCT af.publisher_id) DESC) AS publisher_rank
+    FROM
+        authors_dim ad
+    JOIN article_authors_bridge aab ON ad.id = aab.author_id
+    JOIN articles_fact af ON aab.article_id = af.id
+    GROUP BY ad.author
+),
+author_type_rank AS (
+    SELECT
+        ad.author,
+        COUNT(DISTINCT af.type_id) AS type_count,
+        RANK() OVER (ORDER BY COUNT(DISTINCT af.type_id) DESC) AS type_rank
+    FROM
+        authors_dim ad
+    JOIN article_authors_bridge aab ON ad.id = aab.author_id
+    JOIN articles_fact af ON aab.article_id = af.id
+    GROUP BY ad.author
+),
+combined_rank AS (
+    SELECT
+        acr.author,
+        acr.category_rank,
+        apr.publisher_rank,
+        atr.type_rank,
+        ROUND((acr.category_rank + apr.publisher_rank + atr.type_rank) / 3.0, 0) AS average_rank
+    FROM
+        author_category_rank acr
+    JOIN author_publisher_rank apr ON acr.author = apr.author
+    JOIN author_type_rank atr ON acr.author = atr.author
+)
+SELECT
+    author,
+    category_rank,
+    publisher_rank,
+    type_rank,
+    average_rank
+FROM
+    combined_rank
+ORDER BY
+    average_rank;
