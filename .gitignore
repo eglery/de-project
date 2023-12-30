@@ -4,3 +4,6 @@ data/arxiv-metadata-oai-snapshot.json
 data/chunks/*
 !data/chunks/readme.Md
 test.py
+neo4j/data/*
+neo4j/import/*
+neo4j/logs/*
