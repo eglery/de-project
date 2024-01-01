@@ -5,6 +5,7 @@ import requests
 import json
 import pandas as pd
 import hashlib
+import psycopg2
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
@@ -283,6 +284,9 @@ def fetch_crossref_data(doi, rate_limit_interval=1.0/50):  # keep the requests t
                 'published_online': data.get('published-online', {}).get('date-parts', [[]])[0],
                 'is_referenced_by_count': data.get('is-referenced-by-count', 0),
                 'references_count': data.get('references-count', 0),
+                'container_title': ' '.join(data.get('container-title', [])),
+                'short_container_title': ' '.join(data.get('short-container-title', [])),
+                'ISSN': ' '.join(data.get('ISSN', []))
             }
             print(f"Fetched data: {fetched_data}")
             cache[doi] = fetched_data
@@ -306,13 +310,14 @@ def read_json_chunk_and_enrich(raw_file):
             df_selected = df_filtered[SELECT_COLUMNS]
             new_data = fetch_data_concurrently(df_selected, fetch_crossref_data)
             enriched_df = pd.DataFrame(new_data)
-            enriched_df['is_referenced_by_count'] = enriched_df['is_referenced_by_count'].fillna(0).astype(int)
-            enriched_df['references_count'] = enriched_df['references_count'].fillna(0).astype(int)
+            arxiv_enriched = enriched_df.merge(df_selected[SELECT_COLUMNS], on='doi', how='left')
+            arxiv_enriched['is_referenced_by_count'] = arxiv_enriched['is_referenced_by_count'].fillna(0).astype(int)
+            arxiv_enriched['references_count'] = arxiv_enriched['references_count'].fillna(0).astype(int)
             file_path = ENRICHED_PARQUET
             if os.path.exists(file_path):
                 os.remove(file_path)
                 log.info(f"File {file_path} exists and has been deleted.")       
-            enriched_df.to_parquet(file_path)
+            arxiv_enriched.to_parquet(file_path)
             log.info(f"Created a new file at {file_path}.")
         return df
     except Exception as e:
@@ -333,23 +338,15 @@ def list_to_datetime(date_list):
         return pd.to_datetime('-'.join(map(str, date_list)))
     else:
         return pd.NaT
-    
-def create_temp_table(cursor, table_name, df):
-    columns = ', '.join([f'{col} {dtype}' for col, dtype in zip(df.columns, df.dtypes)])
-    cursor.execute(f'CREATE TEMP TABLE {table_name} ({columns}) ON COMMIT DELETE ROWS')
-    for row in df.itertuples(index=False):
-        cursor.execute(f'INSERT INTO {table_name} VALUES {row}')
 
 def prep_and_import_to_pg_database(parquet_file):
     log = LoggingMixin().log
+    hook = PostgresHook(postgres_conn_id='postgres-data')
+    conn = hook.get_conn()
+    cursor = conn.cursor()
     try:
-
-        hook = PostgresHook('postgres-data')
-        conn = hook.get_conn()
-        cursor = conn.cursor()
         arxiv_enriched = pd.read_parquet(parquet_file)
         log.info(f"{arxiv_enriched} loaded successfully.")
-
         articles_df = arxiv_enriched[['doi', 'title', 'is_referenced_by_count', 'references_count']]
         authors_exploded = arxiv_enriched.explode('authors_parsed') # unnest authors
         authors_doi_df = pd.DataFrame({
@@ -359,36 +356,43 @@ def prep_and_import_to_pg_database(parquet_file):
         authors_doi_df['author_hash'] = authors_doi_df['author'].apply(hash_author)
         doi_author_hash_df = authors_doi_df[['doi','author_hash']]
         authors_df = authors_doi_df[['author_hash','author']].drop_duplicates()
+
         # split the 'categories' column into separate rows
         categories_expanded = arxiv_enriched['categories'].str.split(' ', expand=True).stack()
         categories_expanded.name = 'category'
         categories_expanded_df = arxiv_enriched.drop(columns=['categories']).join(categories_expanded.reset_index(level=1, drop=True))
         doi_category_df = categories_expanded_df[['doi','category']]
         categories_df = doi_category_df[['category']].drop_duplicates()
+
         types_df = arxiv_enriched[['doi', 'type']]
         publishers_df = arxiv_enriched[['doi', 'publisher']]
         journals_df = arxiv_enriched[['doi', 'ISSN', 'container_title', 'short_container_title', 'volume', 'issue']]
         journals_df = journals_df.dropna(subset=['ISSN'])
         published_df = arxiv_enriched[['doi', 'published_online']]
-        published_df['published_date'] = published_df['published_online'].apply(list_to_datetime)
-        published_df['published_online'] = published_df['published_online'].apply(lambda x: str(x) if x is not None else None)
+        published_df[:,'published_date'] = published_df['published_online'].apply(list_to_datetime)
+        published_df[:,'published_online'] = published_df['published_online'].apply(lambda x: str(x) if x is not None else None)
         
+        records = list(articles_df.to_records(index=False))
+
         # Create temporary tables
-        create_temp_table(cursor, 'temp_articles', articles_df)
-        create_temp_table(cursor, 'temp_authors', authors_df)
-        create_temp_table(cursor, 'temp_doi_author_hash', doi_author_hash_df)
-        create_temp_table(cursor, 'temp_categories', categories_df)
-        create_temp_table(cursor, 'temp_doi_category', doi_category_df)
-        create_temp_table(cursor, 'temp_types', types_df)
-        create_temp_table(cursor, 'temp_publishers', publishers_df)
-        create_temp_table(cursor, 'temp_journals', journals_df)
-        create_temp_table(cursor, 'temp_published', published_df)
+        # articles_df.to_sql('temp_articles', conn, if_exists='replace', index=False)
+        # authors_df.to_sql('temp_authors', conn, if_exists='replace', index=False)
+        # doi_author_hash_df.to_sql('temp_doi_author_hash', conn, if_exists='replace', index=False)
+        # categories_df.to_sql('temp_categories', conn, if_exists='replace', index=False)
+        # doi_category_df.to_sql('temp_doi_category', conn, if_exists='replace', index=False)
+        # types_df.to_sql('temp_types', conn, if_exists='replace', index=False)
+        # publishers_df.to_sql('temp_publishers', conn, if_exists='replace', index=False)
+        # journals_df.to_sql('temp_journals', conn, if_exists='replace', index=False)
+        # published_df.to_sql('temp_published', conn, if_exists='replace', index=False)
 
     except BaseException as e:
         log.error(f"Error occurred: {e}")
     finally:
-        cursor.close()
-        conn.close()
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
+    return True  # return True so downstream tasks are not skipped 
 
 prep_data_and_import_to_pg_database_operator = PythonOperator(
     task_id=f'prep_and_import_to_pg_database',
