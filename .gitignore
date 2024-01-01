@@ -8,3 +8,4 @@ neo4j/data/*
 neo4j/import/*
 neo4j/logs/*
 archive_data_enrichment/
+dags/__pycache__/*
