@@ -284,7 +284,7 @@ def fetch_crossref_data(doi, rate_limit_interval=1.0/50):  # keep the requests t
                 'is_referenced_by_count': data.get('is-referenced-by-count', 0),
                 'references_count': data.get('references-count', 0),
             }
-
+            print(f"Fetched data: {fetched_data}")
             cache[doi] = fetched_data
 
             return fetched_data
@@ -540,7 +540,6 @@ drop_temp_tables_operator = ShortCircuitOperator(
 #     python_callable=prepare_insert_statement_for_chunk_statement,
 #     dag=load_arxiv_data,
 # )
-
 
 # def execute_sql_chunks_statement():
 #     files = os.listdir(CHUNKS_PATH)
