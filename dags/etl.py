@@ -4,6 +4,7 @@ import time
 import requests
 import json
 import pandas as pd
+import hashlib
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
@@ -29,11 +30,11 @@ ENRICHED_PATH = f'{DATA_FOLDER}/enriched'
 CHUNK_SIZE = 50000
 API_EMAIL = ['egle.ryytli@gmail.com'] #for Crossref, no need to register, just need to use some e-mail
 API_MAX_WORKERS = 20
-JSON_CHUNK = f'{CHUNKS_PATH}/chunk_1.json'
-ENRICHED_PARQUET = f'{ENRICHED_PATH}/en_chunk_1.parquet'
+JSON_CHUNK = f'{CHUNKS_PATH}/chunk_2.json'
+ENRICHED_PARQUET = f'{ENRICHED_PATH}/en_chunk_2.parquet'
 DROP_NAN_COLUMNS = ['doi'] # for dropping all columns with missing DOI
 SELECT_COLUMNS = ['title', 'doi', 'categories', 'authors_parsed']
-ARTICLE_COUNT_TO_ENRICH = 100 #to speed up the process use only some DOI codes to enrich
+ARTICLE_COUNT_TO_ENRICH = 10 #to speed up the process use only some DOI codes to enrich
 #NB! to query data for all DOIs in a file use #len(df['doi'])
 
 load_arxiv_data = DAG(
@@ -234,8 +235,29 @@ create_pg_mat_views_operator = ShortCircuitOperator(
     dag=load_arxiv_data,
 )
 
+cache = {}  # cache for storing fetched data
+def fetch_data_concurrently(df, func):
+    log = LoggingMixin().log
+    results = []
+    total = ARTICLE_COUNT_TO_ENRICH #len(df['doi']) #NB! to query data for all DOIs in a file use len()
+    completed = 0
 
-cache = {}
+    with ThreadPoolExecutor(max_workers=API_MAX_WORKERS) as executor:
+        future_to_doi = {executor.submit(func, doi): doi for doi in df['doi'][:total]}  # Slice the DataFrame here
+        for future in as_completed(future_to_doi):
+            try:
+                doi = future_to_doi[future]
+                data = future.result()
+                if data is not None:  # Check if data is None
+                    data['doi'] = doi
+                    results.append(data)
+                completed += 1
+                log.info(f"Completed {completed}/{total} DOI queries.")
+            except Exception as e:
+                log.error(f"An error occurred: {e}")
+
+    return results
+
 def fetch_crossref_data(doi, rate_limit_interval=1.0/50):  # keep the requests to 50 requests per second, Crossref might block you when too many requests
     time.sleep(rate_limit_interval)
 
@@ -270,29 +292,7 @@ def fetch_crossref_data(doi, rate_limit_interval=1.0/50):  # keep the requests t
             return None
     except Exception as e:
         return None
-
-def fetch_data_concurrently(df, func):
-    log = LoggingMixin().log
-    results = []
-    total = ARTICLE_COUNT_TO_ENRICH #len(df['doi']) #NB! to query data for all DOIs in a file use len()
-    completed = 0
-
-    with ThreadPoolExecutor(max_workers=API_MAX_WORKERS) as executor:
-        future_to_doi = {executor.submit(func, doi): doi for doi in df['doi'][:total]}  # Slice the DataFrame here
-        for future in as_completed(future_to_doi):
-            try:
-                doi = future_to_doi[future]
-                data = future.result()
-                if data is not None:  # Check if data is None
-                    data['doi'] = doi
-                    results.append(data)
-                completed += 1
-                log.info(f"Completed {completed}/{total} DOI queries.", end='\r')
-            except Exception as e:
-                log.error(f"An error occurred: {e}")
-
-    return results
-
+    
 def read_json_chunk_and_enrich(raw_file):
     log = LoggingMixin().log
     try:
@@ -306,6 +306,8 @@ def read_json_chunk_and_enrich(raw_file):
             df_selected = df_filtered[SELECT_COLUMNS]
             new_data = fetch_data_concurrently(df_selected, fetch_crossref_data)
             enriched_df = pd.DataFrame(new_data)
+            enriched_df['is_referenced_by_count'] = enriched_df['is_referenced_by_count'].fillna(0).astype(int)
+            enriched_df['references_count'] = enriched_df['references_count'].fillna(0).astype(int)
             file_path = ENRICHED_PARQUET
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -323,11 +325,109 @@ data_enrichment_operator = PythonOperator(
     dag=load_arxiv_data,
 )
 
-def prep_and_import_to_pg_database(ENRICHED_PARQUET):
+def hash_author(name):
+    return hashlib.md5(name.encode()).hexdigest()
+
+def list_to_datetime(date_list):
+    if date_list is not None:
+        return pd.to_datetime('-'.join(map(str, date_list)))
+    else:
+        return pd.NaT
+    
+def create_temp_table(cursor, table_name, df):
+    columns = ', '.join([f'{col} {dtype}' for col, dtype in zip(df.columns, df.dtypes)])
+    cursor.execute(f'CREATE TEMP TABLE {table_name} ({columns}) ON COMMIT DELETE ROWS')
+    for row in df.itertuples(index=False):
+        cursor.execute(f'INSERT INTO {table_name} VALUES {row}')
+
+def prep_and_import_to_pg_database(parquet_file):
     log = LoggingMixin().log
+    try:
 
+        hook = PostgresHook('postgres-data')
+        conn = hook.get_conn()
+        cursor = conn.cursor()
+        arxiv_enriched = pd.read_parquet(parquet_file)
+        log.info(f"{arxiv_enriched} loaded successfully.")
 
+        articles_df = arxiv_enriched[['doi', 'title', 'is_referenced_by_count', 'references_count']]
+        authors_exploded = arxiv_enriched.explode('authors_parsed') # unnest authors
+        authors_doi_df = pd.DataFrame({
+                                        'doi': authors_exploded['doi'],
+                                        'author': authors_exploded['authors_parsed'].apply(lambda x: ', '.join(filter(None, x)))
+                                        })
+        authors_doi_df['author_hash'] = authors_doi_df['author'].apply(hash_author)
+        doi_author_hash_df = authors_doi_df[['doi','author_hash']]
+        authors_df = authors_doi_df[['author_hash','author']].drop_duplicates()
+        # split the 'categories' column into separate rows
+        categories_expanded = arxiv_enriched['categories'].str.split(' ', expand=True).stack()
+        categories_expanded.name = 'category'
+        categories_expanded_df = arxiv_enriched.drop(columns=['categories']).join(categories_expanded.reset_index(level=1, drop=True))
+        doi_category_df = categories_expanded_df[['doi','category']]
+        categories_df = doi_category_df[['category']].drop_duplicates()
+        types_df = arxiv_enriched[['doi', 'type']]
+        publishers_df = arxiv_enriched[['doi', 'publisher']]
+        journals_df = arxiv_enriched[['doi', 'ISSN', 'container_title', 'short_container_title', 'volume', 'issue']]
+        journals_df = journals_df.dropna(subset=['ISSN'])
+        published_df = arxiv_enriched[['doi', 'published_online']]
+        published_df['published_date'] = published_df['published_online'].apply(list_to_datetime)
+        published_df['published_online'] = published_df['published_online'].apply(lambda x: str(x) if x is not None else None)
+        
+        # Create temporary tables
+        create_temp_table(cursor, 'temp_articles', articles_df)
+        create_temp_table(cursor, 'temp_authors', authors_df)
+        create_temp_table(cursor, 'temp_doi_author_hash', doi_author_hash_df)
+        create_temp_table(cursor, 'temp_categories', categories_df)
+        create_temp_table(cursor, 'temp_doi_category', doi_category_df)
+        create_temp_table(cursor, 'temp_types', types_df)
+        create_temp_table(cursor, 'temp_publishers', publishers_df)
+        create_temp_table(cursor, 'temp_journals', journals_df)
+        create_temp_table(cursor, 'temp_published', published_df)
 
+    except BaseException as e:
+        log.error(f"Error occurred: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+prep_data_and_import_to_pg_database_operator = PythonOperator(
+    task_id=f'prep_and_import_to_pg_database',
+    python_callable=prep_and_import_to_pg_database,
+    op_kwargs={'parquet_file': ENRICHED_PARQUET},
+    dag=load_arxiv_data,
+)
+
+def insert_data_to_pg_tables():
+    log = LoggingMixin().log
+    try:
+        sql_file = os.path.join(os.path.dirname(__file__), 'dwh_view', 'insert_data_to_pg_tagles.sql')
+        hook = PostgresHook(postgres_conn_id='postgres-data')
+        conn = hook.get_conn()
+        cursor = conn.cursor()
+        with open(sql_file, 'r') as file:
+            sql_commands = file.read().split(';')  # split the file into individual SQL commands
+
+        for sql_command in sql_commands:
+            if sql_command.strip() != '':
+                log.info(f"Executing SQL command: {sql_command}")
+                try:
+                    cursor.execute(sql_command)
+                    log.info("SQL command executed successfully.")
+                except Exception as e:
+                    log.error(f"Error executing SQL command: {e}")
+                conn.commit()
+    except Exception as e:
+        raise Exception(f"Error executing SQL script: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+    return True  # return True so downstream tasks are not skipped
+
+insert_data_to_pg_tables_operator = ShortCircuitOperator(
+    task_id='insert_data_to_pg_tables',
+    python_callable=insert_data_to_pg_tables,
+    dag=load_arxiv_data,
+)
 
 def refresh_mat_views():
     log = LoggingMixin().log
@@ -358,8 +458,37 @@ refresh_mat_views_operator = ShortCircuitOperator(
     dag=load_arxiv_data
 )
 
+def drop_temp_tables():
+    log = LoggingMixin().log
+    hook = PostgresHook(postgres_conn_id='postgres-data')
+    conn = hook.get_conn()
+    cur = conn.cursor()
 
+    try:
+        cur.execute("""
+            DROP TEMP TABLE IF EXISTS temp_articles;
+            DROP TEMP TABLE IF EXISTS temp_authors;
+            DROP TEMP TABLE IF EXISTS temp_doi_author_hash;
+            DROP TEMP TABLE IF EXISTS temp_categories;
+            DROP TEMP TABLE IF EXISTS temp_doi_category;
+            DROP TEMP TABLE IF EXISTS temp_types;
+            DROP TEMP TABLE IF EXISTS temp_publishers;
+            DROP TEMP TABLE IF EXISTS temp_journals;
+            DROP TEMP TABLE IF EXISTS temp_published;
+        """)
+    except Exception as e:
+        log.info(f"Error refreshing materialized views: {e}")
+    finally:
+        cur.close()
+        conn.close()
+    return True  # return True so downstream tasks are not skipped
 
+drop_temp_tables_operator = ShortCircuitOperator(
+    task_id='drop_temp_tables',
+    python_callable=drop_temp_tables,
+    provide_context=True,
+    dag=load_arxiv_data
+)
 # def prepare_insert_statement_for_chunk_statement():
 #     files = os.listdir(CHUNKS_PATH)
 #     files = list(filter(lambda file: file != 'readme.Md' and file.split('.')[1] == 'json', files))
@@ -530,6 +659,6 @@ refresh_mat_views_operator = ShortCircuitOperator(
 # )
 
 #check_data_operator >> insert_tables_to_db_operator >> 
-split_file_operator >> create_pg_tables_operator >> create_pg_mat_views_operator >> data_enrichment_operator >> refresh_mat_views_operator
+split_file_operator >> create_pg_tables_operator >> create_pg_mat_views_operator >> data_enrichment_operator >> prep_data_and_import_to_pg_database_operator >> insert_data_to_pg_tables_operator >> refresh_mat_views_operator >> drop_temp_tables_operator
 #>> execute_prepare_neo4j_operator >> execute_neo4j_import_operator #>> refresh_mat_views_operator
 #>> prepare_chunk_operator >> execute_chunks_operator 
