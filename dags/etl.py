@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import requests
+import json
+import pandas as pd
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
@@ -25,10 +27,14 @@ DATA_FOLDER = '/tmp/data'
 CHUNKS_PATH = f'{DATA_FOLDER}/chunks'
 ENRICHED_PATH = f'{DATA_FOLDER}/enriched'
 CHUNK_SIZE = 50000
-API_EMAIL = ['egle.ryytli@gmail.com'], #for Crossref, no need to register, just need to use some e-mail
-API_MAX_WORKERS = 20,
-raw_file = '/tmp/data/chunks/chunk_0.json',
-enriched_file = '/tmp/data/enriched/en_chunk_0.parquet'
+API_EMAIL = ['egle.ryytli@gmail.com'] #for Crossref, no need to register, just need to use some e-mail
+API_MAX_WORKERS = 20
+JSON_CHUNK = f'{CHUNKS_PATH}/chunk_1.json'
+ENRICHED_PARQUET = f'{ENRICHED_PATH}/en_chunk_1.parquet'
+DROP_NAN_COLUMNS = ['doi'] # for dropping all columns with missing DOI
+SELECT_COLUMNS = ['title', 'doi', 'categories', 'authors_parsed']
+ARTICLE_COUNT_TO_ENRICH = 100 #to speed up the process use only some DOI codes to enrich
+#NB! to query data for all DOIs in a file use #len(df['doi'])
 
 load_arxiv_data = DAG(
     'load_arxiv_data',
@@ -228,6 +234,7 @@ create_pg_mat_views_operator = ShortCircuitOperator(
     dag=load_arxiv_data,
 )
 
+
 cache = {}
 def fetch_crossref_data(doi, rate_limit_interval=1.0/50):  # keep the requests to 50 requests per second, Crossref might block you when too many requests
     time.sleep(rate_limit_interval)
@@ -265,30 +272,62 @@ def fetch_crossref_data(doi, rate_limit_interval=1.0/50):  # keep the requests t
         return None
 
 def fetch_data_concurrently(df, func):
+    log = LoggingMixin().log
     results = []
-    total = len(df['doi'])
+    total = ARTICLE_COUNT_TO_ENRICH #len(df['doi']) #NB! to query data for all DOIs in a file use len()
     completed = 0
 
     with ThreadPoolExecutor(max_workers=API_MAX_WORKERS) as executor:
-        future_to_doi = {executor.submit(func, doi): doi for doi in df['doi']}
+        future_to_doi = {executor.submit(func, doi): doi for doi in df['doi'][:total]}  # Slice the DataFrame here
         for future in as_completed(future_to_doi):
-            doi = future_to_doi[future]
-            data = future.result()
-            data['doi'] = doi
-            results.append(data)
-            completed += 1
-            print(f"Completed {completed}/{total} DOI queries.", end='\r')
+            try:
+                doi = future_to_doi[future]
+                data = future.result()
+                if data is not None:  # Check if data is None
+                    data['doi'] = doi
+                    results.append(data)
+                completed += 1
+                log.info(f"Completed {completed}/{total} DOI queries.", end='\r')
+            except Exception as e:
+                log.error(f"An error occurred: {e}")
 
     return results
 
-print(f"Processing file: {raw_file}")
+def read_json_chunk_and_enrich(raw_file):
+    log = LoggingMixin().log
+    try:
+        with open(raw_file, 'r') as file:
+            df = pd.read_json(raw_file, lines=True)
+            original_row_count = len(df)
+            log.info(f"Original row count: {original_row_count}")
+            df_filtered = df.dropna(subset = DROP_NAN_COLUMNS)
+            row_count_after_dropping = len(df_filtered)
+            log.info(f"Row count after dropping NaNs in 'DOI': {row_count_after_dropping}")
+            df_selected = df_filtered[SELECT_COLUMNS]
+            new_data = fetch_data_concurrently(df_selected, fetch_crossref_data)
+            enriched_df = pd.DataFrame(new_data)
+            file_path = ENRICHED_PARQUET
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                log.info(f"File {file_path} exists and has been deleted.")       
+            enriched_df.to_parquet(file_path)
+            log.info(f"Created a new file at {file_path}.")
+        return df
+    except Exception as e:
+        log.error(f"An error occurred: {e}")
 
-data_enrichment_crossref_operator = PythonOperator(
-    task_id='fetch_crossref_data',
-    python_callable=fetch_crossref_data,
-    op_kwargs={'doi': '10.1145/2999134.2999257'},  # replace with your actual DOI
+data_enrichment_operator = PythonOperator(
+    task_id=f'data_enrichment',
+    python_callable=read_json_chunk_and_enrich,
+    op_kwargs={'raw_file': f'{CHUNKS_PATH}/chunk_0.json'},
     dag=load_arxiv_data,
 )
+
+def prep_and_import_to_pg_database(ENRICHED_PARQUET):
+    log = LoggingMixin().log
+
+
+
 
 def refresh_mat_views():
     log = LoggingMixin().log
@@ -491,6 +530,6 @@ refresh_mat_views_operator = ShortCircuitOperator(
 # )
 
 #check_data_operator >> insert_tables_to_db_operator >> 
-split_file_operator >> create_pg_tables_operator >> data_enrichment_crossref_operator >> refresh_mat_views_operator
+split_file_operator >> create_pg_tables_operator >> create_pg_mat_views_operator >> data_enrichment_operator >> refresh_mat_views_operator
 #>> execute_prepare_neo4j_operator >> execute_neo4j_import_operator #>> refresh_mat_views_operator
 #>> prepare_chunk_operator >> execute_chunks_operator 
