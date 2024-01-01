@@ -242,16 +242,19 @@ def prepare_neo4j_files():
     i = 0
     authors = {}
     author_id = 0
+    categories = {}
+    cat_id = 0
 
     for file in files:
         chunk_file = f'{CHUNKS_PATH}/{file}'
             
         rows = []
+        rows2 = []
         papers = []
         with open(chunk_file, 'r') as file:
             for row in file:
                 row = json.loads(row)
-                row = {col: row[col] for col in row if col not in ['comments', 'abstract']}
+                row = {col: row[col] for col in row if col not in ['comments', 'abstract', 'authors_parsed', 'versions']}
                 row['title'] = row['title'].replace('"','').replace("'",'').replace('\\','').replace('\n','')
                 row['submitter'] = 'null' if row['submitter'] is None else row['submitter']
                 row['submitter'] = row['submitter'].replace('"','').replace("'",'').replace('\\','').replace('\n','')
@@ -261,7 +264,7 @@ def prepare_neo4j_files():
                 row['categories'] = 'null' if row['categories'] is None else row['categories']
                 row['license'] = 'null' if row['license'] is None else row['license']
                 row['update_date'] = 'null' if row['update_date'] is None else row['update_date']
-                papers.append({'paperId:ID': row['id'], 'title': row['title'], 'journal-ref': row['journal-ref'], 'doi': row['doi'], 'report-no': row['report-no'], 'categories': row['categories'], 'license': row['license'], 'update_date': row['update_date'], ':LABEL': 'Paper'})
+                papers.append({'paperId:ID': row['id'], 'title': row['title'], 'journal-ref': row['journal-ref'], 'doi': row['doi'], 'report-no': row['report-no'], 'license': row['license'], 'update_date': row['update_date'], ':LABEL': 'Paper'})
                 row['authors'] = re.sub(r'\s*\([^()]*\)', '', re.sub(r'\s*\([^()]*\)', '', row['authors']))
                 row['authors'] = re.split(', | and ', row['authors'])
                 for author in row['authors']:
@@ -273,8 +276,17 @@ def prepare_neo4j_files():
                         authors[exploded['authors']] = author_id
                         author_id += 1
                     rows.append(exploded)
+                row['categories'] = row['categories'].split(' ')
+                for category in row['categories']:
+                    exploded = row.copy()
+                    exploded['categories'] = category
+                    if exploded['categories'] not in categories:
+                        categories[exploded['categories']] = (exploded['categories'].lower().replace('.', '').replace('-', ''), cat_id)
+                        cat_id += 1
+                    exploded['categories'] = exploded['categories'].lower().replace('.', '').replace('-', '')
+                    rows2.append({':START_ID': exploded['id'], ':END_ID': exploded['categories'], ':TYPE': 'BELONGS_TO'})
         relations = [{':START_ID': authors[row['authors']], ':END_ID': row['id'], ':TYPE': 'WROTE'} for row in rows]
-        relations = relations + [{':START_ID': authors[row['authors']], ':END_ID': row['id'], ':TYPE': 'SUBMITTED'} for row in rows if row['submitter'].split(' ')[-1] in row['authors']]
+        relations = relations + [{':START_ID': authors[row['authors']], ':END_ID': row['id'], ':TYPE': 'SUBMITTED'} for row in rows if row['submitter'].split(' ')[-1] in row['authors']] + rows2
 
         with open(f'/tmp/import/papers_{i}.csv', 'w', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, list(papers[0].keys()))
@@ -293,10 +305,15 @@ def prepare_neo4j_files():
             with open('/tmp/import/relations_header.csv', 'w', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, list(relations[0].keys()))
                 writer.writeheader()
+            with open('/tmp/import/categories_header.csv', 'w', encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, ['categoryId:ID', 'categoryName', ':LABEL'])
+                writer.writeheader()
 
         if i == len(files)-1:
             batch_size = len(authors) // len(files)
             prev_batch = 0
+            batch_size2 = len(categories) // len(files)
+            prev_batch2 = 0
             for j in range(len(files)):
                 with open(f'/tmp/import/authors_{j}.csv', 'w') as csvfile:
                     writer = csv.DictWriter(csvfile, ['personId:ID', 'name', ':LABEL'])
@@ -305,6 +322,14 @@ def prepare_neo4j_files():
                     else:
                         batch = [{'personId:ID': v, 'name': k, ':LABEL': 'Author'} for k, v in authors.items() if prev_batch <= v]
                     prev_batch = prev_batch + batch_size
+                    writer.writerows(batch)
+                with open(f'/tmp/import/categories_{j}.csv', 'w', encoding="utf-8") as csvfile:
+                    writer = csv.DictWriter(csvfile, ['categoryId:ID', 'categoryName', ':LABEL'])
+                    if j != len(files)-1:
+                        batch = [{'categoryId:ID': v[0], 'categoryName': k, ':LABEL': 'Category'} for k, v in categories.items() if prev_batch2 <= v[1] < prev_batch2+batch_size2]
+                    else:
+                        batch = [{'categoryId:ID': v[0], 'categoryName': k, ':LABEL': 'Category'} for k, v in categories.items() if prev_batch2 <= v[1]]
+                    prev_batch2 = prev_batch2 + batch_size2
                     writer.writerows(batch)
         
         i += 1
