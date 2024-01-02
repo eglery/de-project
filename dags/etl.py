@@ -31,11 +31,11 @@ ENRICHED_PATH = f'{DATA_FOLDER}/enriched'
 CHUNK_SIZE = 50000
 API_EMAIL = ['egle.ryytli@gmail.com'] #for Crossref, no need to register, just need to use some e-mail
 API_MAX_WORKERS = 20
-JSON_CHUNK = f'{CHUNKS_PATH}/chunk_2.json'
-ENRICHED_PARQUET = f'{ENRICHED_PATH}/en_chunk_2.parquet'
+JSON_CHUNK = f'{CHUNKS_PATH}/chunk_3.json'
+ENRICHED_PARQUET = f'{ENRICHED_PATH}/en_chunk_3.parquet'
 DROP_NAN_COLUMNS = ['doi'] # for dropping all columns with missing DOI
 SELECT_COLUMNS = ['title', 'doi', 'categories', 'authors_parsed']
-ARTICLE_COUNT_TO_ENRICH = 10 #to speed up the process use only some DOI codes to enrich
+ARTICLE_COUNT_TO_ENRICH = 1000 #to speed up the process use only some DOI codes to enrich
 #NB! to query data for all DOIs in a file use #len(df['doi'])
 
 load_arxiv_data = DAG(
