@@ -581,7 +581,7 @@ drop_temp_tables_operator = ShortCircuitOperator(
 def prepare_neo4j_files():
     import csv
     import re
-    
+
     os.makedirs('/tmp/import', exist_ok=True)
 
     files = os.listdir(CHUNKS_PATH)
@@ -694,6 +694,6 @@ execute_neo4j_import_operator = BashOperator(
     dag=load_arxiv_data,
 )
 
-#check_data_operator >> insert_tables_to_db_operator >> 
+#check_data_operator >> insert_tables_to_db_operator >> prepare_chunk_operator >> execute_chunks_operator 
 split_file_operator >> create_pg_tables_operator >> create_pg_mat_views_operator >> data_enrichment_operator >> prep_data_and_import_to_pg_database_operator >> insert_data_to_pg_tables_operator >> refresh_mat_views_operator >> drop_temp_tables_operator >> execute_prepare_neo4j_operator >> execute_neo4j_import_operator
-#>> prepare_chunk_operator >> execute_chunks_operator 
+
