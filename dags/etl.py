@@ -5,7 +5,6 @@ import requests
 import json
 import pandas as pd
 import hashlib
-import psycopg2
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
@@ -582,6 +581,8 @@ drop_temp_tables_operator = ShortCircuitOperator(
 def prepare_neo4j_files():
     import csv
     import re
+    
+    os.makedirs('/tmp/import', exist_ok=True)
 
     files = os.listdir(CHUNKS_PATH)
     files = list(filter(lambda file: file != 'readme.Md' and file.split('.')[1] == 'json', files))
