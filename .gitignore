@@ -2,6 +2,7 @@ logs/*
 data/insert_arxiv_tables.sql
 data/arxiv-metadata-oai-snapshot.json
 data/chunks/*
+data/enriched/*
 !data/chunks/readme.Md
 test.py
 neo4j/data/*
