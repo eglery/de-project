@@ -8,6 +8,7 @@ data folder with the name ```arxiv-metadata-oai-snapshot.json```
 * Webserver: 8091 (Airflow GUI)
 * Airflow DB: 8092 (used by Airflow)
 * Data DB: 8093 (for business data)
+* Graph DB: 7474 (Neo4j)
 
 ### Configuration
 For the webserver to work you need to configure a connection for the database...<br>
