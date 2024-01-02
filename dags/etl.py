@@ -339,11 +339,30 @@ def list_to_datetime(date_list):
     else:
         return pd.NaT
 
+from sqlalchemy import create_engine
+
+from urllib.parse import quote_plus
+
+def get_sqlalchemy_uri(conn_id):
+    hook = PostgresHook(postgres_conn_id=conn_id)
+    conn = hook.get_connection(conn_id)
+    login = ''
+    if conn.login and conn.password:
+        login = quote_plus(conn.login) + ':' + quote_plus(conn.password)
+
+    if conn.host:
+        login = login + '@' + quote_plus(conn.host)
+    if conn.port:
+        login = login + ':' + str(conn.port)
+
+    if conn.schema:
+        login = login + '/' + quote_plus(conn.schema)
+    conn_type = 'postgresql' if conn.conn_type == 'postgres' else conn.conn_type
+    return f"{conn_type}://{login}"  # Use conn_type instead of conn.conn_type
+
 def prep_and_import_to_pg_database(parquet_file):
     log = LoggingMixin().log
-    hook = PostgresHook(postgres_conn_id='postgres-data')
-    conn = hook.get_conn()
-    cursor = conn.cursor()
+    engine = create_engine(get_sqlalchemy_uri('postgres-data'))
     try:
         arxiv_enriched = pd.read_parquet(parquet_file)
         log.info(f"{arxiv_enriched} loaded successfully.")
@@ -369,29 +388,23 @@ def prep_and_import_to_pg_database(parquet_file):
         journals_df = arxiv_enriched[['doi', 'ISSN', 'container_title', 'short_container_title', 'volume', 'issue']]
         journals_df = journals_df.dropna(subset=['ISSN'])
         published_df = arxiv_enriched[['doi', 'published_online']]
-        published_df[:,'published_date'] = published_df['published_online'].apply(list_to_datetime)
-        published_df[:,'published_online'] = published_df['published_online'].apply(lambda x: str(x) if x is not None else None)
+        published_df['published_date'] = published_df['published_online'].apply(list_to_datetime)
+        published_df['published_online'] = published_df['published_online'].apply(lambda x: str(x) if x is not None else None)
         
-        records = list(articles_df.to_records(index=False))
-
-        # Create temporary tables
-        # articles_df.to_sql('temp_articles', conn, if_exists='replace', index=False)
-        # authors_df.to_sql('temp_authors', conn, if_exists='replace', index=False)
-        # doi_author_hash_df.to_sql('temp_doi_author_hash', conn, if_exists='replace', index=False)
-        # categories_df.to_sql('temp_categories', conn, if_exists='replace', index=False)
-        # doi_category_df.to_sql('temp_doi_category', conn, if_exists='replace', index=False)
-        # types_df.to_sql('temp_types', conn, if_exists='replace', index=False)
-        # publishers_df.to_sql('temp_publishers', conn, if_exists='replace', index=False)
-        # journals_df.to_sql('temp_journals', conn, if_exists='replace', index=False)
-        # published_df.to_sql('temp_published', conn, if_exists='replace', index=False)
+        articles_df.to_sql('temp_articles', engine, if_exists='append', index=False)
+        authors_df.to_sql('temp_authors', engine, if_exists='append', index=False)
+        doi_author_hash_df.to_sql('temp_doi_author_hash', engine, if_exists='append', index=False)
+        categories_df.to_sql('temp_categories', engine, if_exists='append', index=False)
+        doi_category_df.to_sql('temp_doi_category', engine, if_exists='append', index=False)
+        types_df.to_sql('temp_types', engine, if_exists='append', index=False)
+        publishers_df.to_sql('temp_publishers', engine, if_exists='append', index=False)
+        journals_df.to_sql('temp_journals', engine, if_exists='append', index=False)
+        published_df.to_sql('temp_published', engine, if_exists='append', index=False)
 
     except BaseException as e:
         log.error(f"Error occurred: {e}")
     finally:
-        if cursor is not None:
-            cursor.close()
-        if conn is not None:
-            conn.close()
+        engine.dispose()
     return True  # return True so downstream tasks are not skipped 
 
 prep_data_and_import_to_pg_database_operator = PythonOperator(
@@ -439,21 +452,19 @@ def refresh_mat_views():
     conn = hook.get_conn()
     cur = conn.cursor()
 
-    try:
-        cur.execute("""
-            REFRESH MATERIALIZED VIEW author_h_index;
-            REFRESH MATERIALIZED VIEW journal_h_index;
-            REFRESH MATERIALIZED VIEW category_h_index;
-            REFRESH MATERIALIZED VIEW publisher_yearly_rank;
-            REFRESH MATERIALIZED VIEW author_diversity_rank;
-            REFRESH MATERIALIZED VIEW avg_citation_difference_by_type;
-        """)
-    except Exception as e:
-        log.info(f"Error refreshing materialized views: {e}")
-    finally:
-        cur.close()
-        conn.close()
-    return True  # return True so downstream tasks are not skipped
+    views = ['author_h_index', 'journal_h_index', 'category_h_index', 'publisher_yearly_rank', 'author_diversity_rank', 'avg_citation_difference_by_type']
+
+    for view in views:
+        try:
+            cur.execute(f"REFRESH MATERIALIZED VIEW {view};")
+            conn.commit()
+            log.info(f"Materialized view {view} refreshed successfully.")
+        except Exception as e:
+            log.info(f"Error refreshing materialized view {view}: {e}")
+
+    cur.close()
+    conn.close()
+    return True
 
 refresh_mat_views_operator = ShortCircuitOperator(
     task_id='refresh_mat_views',
@@ -468,24 +479,19 @@ def drop_temp_tables():
     conn = hook.get_conn()
     cur = conn.cursor()
 
-    try:
-        cur.execute("""
-            DROP TEMP TABLE IF EXISTS temp_articles;
-            DROP TEMP TABLE IF EXISTS temp_authors;
-            DROP TEMP TABLE IF EXISTS temp_doi_author_hash;
-            DROP TEMP TABLE IF EXISTS temp_categories;
-            DROP TEMP TABLE IF EXISTS temp_doi_category;
-            DROP TEMP TABLE IF EXISTS temp_types;
-            DROP TEMP TABLE IF EXISTS temp_publishers;
-            DROP TEMP TABLE IF EXISTS temp_journals;
-            DROP TEMP TABLE IF EXISTS temp_published;
-        """)
-    except Exception as e:
-        log.info(f"Error refreshing materialized views: {e}")
-    finally:
-        cur.close()
-        conn.close()
-    return True  # return True so downstream tasks are not skipped
+    tables = ['temp_articles', 'temp_authors', 'temp_doi_author_hash', 'temp_categories', 'temp_doi_category', 'temp_types', 'temp_publishers', 'temp_journals', 'temp_published']
+
+    for table in tables:
+        try:
+            cur.execute(f"DROP TABLE IF EXISTS {table};")
+            conn.commit()
+            log.info(f"Table {table} dropped successfully.")
+        except Exception as e:
+            log.info(f"Error dropping table {table}: {e}")
+
+    cur.close()
+    conn.close()
+    return True
 
 drop_temp_tables_operator = ShortCircuitOperator(
     task_id='drop_temp_tables',

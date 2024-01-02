@@ -157,11 +157,14 @@ ORDER BY
 CREATE MATERIALIZED VIEW IF NOT EXISTS avg_citation_difference_by_type AS
 SELECT
     td.type,
-    AVG(af.is_referenced_by_count - af.references_count) AS avg_citation_difference
+    cd.category,
+    AVG(af.is_referenced_by_count - af.references_count) AS avg_citation_difference,
+    GROUPING(td.type) AS group_id_1, GROUPING(cd.category) AS group_id_2
 FROM
     articles_fact af
 INNER JOIN types_dim td ON af.type_id = td.id
+INNER JOIN categories_dim cd ON af.id = cd.id
 GROUP BY
-    td.type
+    ROLLUP(td.type, cd.category)
 ORDER BY
     avg_citation_difference DESC;
